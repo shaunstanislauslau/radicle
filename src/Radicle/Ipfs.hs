@@ -48,9 +48,8 @@ import qualified Data.Text.Encoding as T
 import           Lens.Micro ((.~), (^.))
 import           Network.HTTP.Client
                  (HttpException(..), HttpExceptionContent(..))
-import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client as Http
-import qualified Network.HTTP.Conduit as HTTP
+import qualified Network.HTTP.Conduit as Http
 import qualified Network.Wreq as Wreq
 import           System.Environment (lookupEnv)
 
@@ -187,15 +186,15 @@ instance FromJSON PubsubMessage where
 -- you need to kill the thread the subscription is running in.
 subscribe :: Text -> (PubsubMessage -> IO ()) -> IO ()
 subscribe topic messageHandler = runResourceT $ do
-    mgr <- liftIO $ HTTP.newManager HTTP.defaultManagerSettings
+    mgr <- liftIO $ Http.newManager Http.defaultManagerSettings
     url <- liftIO $ ipfsApiUrl "pubsub/sub"
-    req <- HTTP.parseRequest (toS url) <&>
-        HTTP.setQueryString
+    req <- Http.parseRequest (toS url) <&>
+        Http.setQueryString
         [ ("arg", Just $ T.encodeUtf8 topic)
         , ("encoding", Just "json")
         , ("stream-channels", Just "true")
         ]
-    body <- HTTP.responseBody <$> HTTP.http req mgr
+    body <- Http.responseBody <$> Http.http req mgr
     C.runConduit $ body .| fromJSONC .| C.mapM_ (liftIO . messageHandler) .| C.sinkNull
     pure ()
   where
@@ -273,7 +272,7 @@ newtype NameResolveResponse
     = NameResolveResponse CID
 
 nameResolve :: IpnsId -> IO NameResolveResponse
-nameResolve ipnsId = ipfsHttpGet "name/resolve" [("arg", ipnsId), ("recursive", "true")]
+nameResolve ipnsId = ipfsHttpGet "name/resolve" [("arg", ipnsId), ("recursive", "true"), ("dht-timeout", ipfsTimeout)]
 
 instance FromJSON NameResolveResponse where
     parseJSON = Aeson.withObject "v0/name/resolve response" $ \o -> do
@@ -294,7 +293,7 @@ ipfsHttpGet
     -> [(Text, Text)] -- ^ URL query parameters
     -> IO a
 ipfsHttpGet path params = mapHttpException path $ do
-    let opts = Wreq.defaults & Wreq.params .~ params
+    let opts = reqOpts params
     url <- ipfsApiUrl path
     res <- Wreq.getWith opts (toS url)
     getJsonResponseBody path res
@@ -317,7 +316,7 @@ ipfsHttpPost'
     -> LByteString -- ^ Payload argument
     -> IO (Wreq.Response LByteString)
 ipfsHttpPost' path params payloadArgName payload = mapHttpException path $ do
-    let opts = Wreq.defaults & Wreq.params .~ params
+    let opts = reqOpts params
     url <- ipfsApiUrl path
     Wreq.postWith opts (toS url) (Wreq.partLBS payloadArgName payload)
 
@@ -325,6 +324,16 @@ ipfsApiUrl :: Text -> IO Text
 ipfsApiUrl path = do
     baseUrl <- fromMaybe "http://localhost:9301" <$> lookupEnv "RAD_IPFS_API_URL"
     pure $ toS baseUrl <> "/api/v0/" <> path
+
+reqOpts :: [(Text, Text)] -> Wreq.Options
+reqOpts params =
+  Wreq.defaults
+    & Wreq.params .~ params
+    & Wreq.manager .~ Left (Http.defaultManagerSettings { Http.managerResponseTimeout = Http.responseTimeoutMicro (60 * 1000000) } )
+
+-- | Timeout for IPFS API.
+ipfsTimeout :: Text
+ipfsTimeout = "60s"
 
 -- | Parses response body as JSON and returns the parsed value. @path@
 -- is the IPFS API the response was obtained from. Throws
